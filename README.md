@@ -100,7 +100,7 @@ d73092d8b00e5f09db8b19c5e62c1e9322a971b68c298b6e20b58dc76bb140dd  "a"
 ```
 
 An implementation is correct if it produces these exact outputs.
-See `vectors/test_vectors.txt` for the full vector set.
+
 
 ### Strict Avalanche Criterion
 
