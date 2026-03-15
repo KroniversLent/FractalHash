@@ -1,0 +1,5 @@
+# Build outputs
+fractal_hash
+fractal_gpu
+fractal_cipher
+*.o
