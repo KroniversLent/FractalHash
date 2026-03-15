@@ -226,8 +226,6 @@ gap to roughly 50×. This is not yet implemented.
 │   ├── birthday.cu           birthday collision test
 │   ├── differential.cu       differential cryptanalysis (3 tests)
 │   └── gpu_main.cu           GPU CLI
-├── vectors/
-│   └── test_vectors.txt      canonical test vectors
 ├── Makefile
 ├── rebuild.sh                force clean rebuild (fixes timestamp issues)
 ├── verify_consistency.sh     CPU/GPU output consistency check
