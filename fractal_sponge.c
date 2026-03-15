@@ -18,6 +18,61 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* ── AVX2 runtime dispatch ────────────────────────────────────────────────── */
+/* Declared in fractal_sponge_avx2.c (compiled with -mavx2) */
+extern void fractal_permutation_avx2(uint64_t s[8]);
+
+/* CPUID leaf 7 / EBX bit 5 = AVX2 */
+static int cpu_has_avx2(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    /* Check CPUID max leaf */
+    __asm__ volatile (
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "0"(0)
+    );
+    if (eax < 7) return 0;
+    /* Leaf 7, sub-leaf 0 */
+    eax = 7; ecx = 0;
+    __asm__ volatile (
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "0"(eax), "2"(ecx)
+    );
+    /* EBX bit 5 = AVX2; also check OS saves YMM (OSXSAVE + YMM state) */
+    if (!(ebx & (1u << 5))) return 0;
+    /* Verify XSAVE enabled by OS (OSXSAVE = ECX bit 27 in leaf 1) */
+    eax = 1; ecx = 0;
+    __asm__ volatile (
+        "cpuid"
+        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+        : "0"(eax), "2"(ecx)
+    );
+    if (!(ecx & (1u << 27))) return 0;
+    /* Read XCR0 to check OS saves YMM registers (bit 2) */
+    unsigned long long xcr0;
+    __asm__ volatile ("xgetbv" : "=A"(xcr0) : "c"(0));
+    return (xcr0 & 0x6) == 0x6;
+#else
+    return 0;
+#endif
+}
+
+/* Forward declaration — defined later in this file */
+static void fractal_permutation(uint64_t s[8]);
+
+/* Function pointer — set on first call */
+static void (*active_permutation)(uint64_t[8]) = NULL;
+
+static void init_permutation(void) {
+    if (cpu_has_avx2()) {
+        active_permutation = fractal_permutation_avx2;
+    } else {
+        active_permutation = fractal_permutation;
+    }
+}
+
 /* Disable FMA contraction — see build note above. The pragma is C99/C11
  * standard but gcc requires -std=c99 or higher to honour it.
  * The Makefile uses -ffp-contract=off as the reliable gcc equivalent. */
@@ -249,16 +304,24 @@ void fs256_hash(const uint8_t *data, size_t len, uint8_t digest[FS256_DIGEST_BYT
 
     size_t plen = fs_pad(data, len, buf);
 
+    /* One-time CPU capability detection */
+    if (!active_permutation) init_permutation();
+
     uint64_t state[8] = {0};
     for (size_t off = 0; off < plen; off += FS_BLOCK_BYTES) {
         for (int j = 0; j < FS_RATE_WORDS; j++)
             state[j] ^= be64(buf + off + j*8);
-        fractal_permutation(state);
+        active_permutation(state);
     }
     free(buf);
 
     for (int i = 0; i < 4; i++)
         put_be64(digest + i*8, state[i]);
+}
+
+void fs256_permute(uint64_t state[FS_STATE_WORDS]) {
+    if (!active_permutation) init_permutation();
+    active_permutation(state);
 }
 
 void fs256_hash_hex(const uint8_t *data, size_t len, char hex[FS256_DIGEST_HEX]) {
