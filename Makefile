@@ -61,11 +61,16 @@ NVCCFLAGS_STRICT := -O3 -arch=$(GPU_ARCH) -Xcompiler -O2 \
                     -lineinfo -Wno-deprecated-gpu-targets \
                     -diag-suppress 177
 
-fractal_gpu: fractal_sponge_cu.o birthday.o avalanche.o differential.o gpu_main.o fractal_sponge_cpu.o
+fractal_gpu: fractal_sponge_cu.o birthday.o avalanche.o differential.o gpu_main.o fractal_sponge_cpu.o fractal_sponge_avx2_cpu.o
 	$(NVCC) $(NVCCFLAGS) -o $@ $^ -lm
 
 fractal_sponge_cpu.o: fractal_sponge.c fractal_sponge.h
 	$(NVCC) $(NVCCFLAGS_STRICT) -x c++ -o $@ -c $<
+
+# AVX2 host code compiled via nvcc so it shares the same C++ ABI as
+# fractal_sponge_cpu.o.  -Xcompiler -mavx2 passes the flag to the host gcc.
+fractal_sponge_avx2_cpu.o: fractal_sponge_avx2.c fractal_sponge.h
+	$(NVCC) $(NVCCFLAGS_STRICT) -Xcompiler -mavx2 -x c++ -o $@ -c $<
 
 fractal_sponge_cu.o: fractal_sponge.cu fractal_sponge.cuh
 	$(NVCC) $(NVCCFLAGS) -dc -o $@ $<
@@ -101,7 +106,7 @@ clean:
 	rm -f fractal_hash fractal_gpu fractal_cipher \
 	      fractal_sponge.o fractal_sponge_avx2.o main.o \
 	      fractal_cipher.o cipher_main.o \
-	      fractal_sponge_cpu.o fractal_sponge_cu.o \
+	      fractal_sponge_cpu.o fractal_sponge_avx2_cpu.o fractal_sponge_cu.o \
 	      birthday.o avalanche.o differential.o gpu_main.o
 
 info:
