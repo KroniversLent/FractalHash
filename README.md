@@ -228,7 +228,6 @@ gap to roughly 50×. This is not yet implemented.
 │   └── gpu_main.cu           GPU CLI
 ├── Makefile
 ├── rebuild.sh                force clean rebuild (fixes timestamp issues)
-├── verify_consistency.sh     CPU/GPU output consistency check
 └── README.md
 ```
 
