@@ -18,12 +18,14 @@ endif
 NVCCFLAGS := -O3 -arch=$(GPU_ARCH) --use_fast_math -Xcompiler -O2 \
              -lineinfo -Wno-deprecated-gpu-targets
 
-CPU_OBJS := fractal_sponge.o main.o
+CPU_OBJS    := fractal_sponge.o fractal_sponge_avx2.o main.o
+CIPHER_OBJS := fractal_sponge.o fractal_sponge_avx2.o fractal_cipher.o cipher_main.o
 
-.PHONY: all cpu gpu clean test test-gpu info
+.PHONY: all cpu gpu cipher clean test test-gpu test-cipher info
 
-all: cpu gpu
+all: cpu cipher gpu
 cpu: fractal_hash
+cipher: fractal_cipher
 gpu: fractal_gpu
 
 # ── CPU ──────────────────────────────────────────────────────────────────────
@@ -33,7 +35,21 @@ fractal_hash: $(CPU_OBJS)
 fractal_sponge.o: fractal_sponge.c fractal_sponge.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+# AVX2 file compiled with -mavx2 only — still strict IEEE 754, no fast-math
+fractal_sponge_avx2.o: fractal_sponge_avx2.c fractal_sponge.h
+	$(CC) $(CFLAGS) -mavx2 -c -o $@ $<
+
 main.o: main.c fractal_sponge.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# ── Cipher ───────────────────────────────────────────────────────────────────
+fractal_cipher: $(CIPHER_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+fractal_cipher.o: fractal_cipher.c fractal_cipher.h fractal_sponge.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+cipher_main.o: cipher_main.c fractal_cipher.h fractal_sponge.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # ── GPU ──────────────────────────────────────────────────────────────────────
@@ -67,9 +83,13 @@ gpu_main.o: gpu_main.cu fractal_sponge.cuh fractal_sponge.h
 	$(NVCC) $(NVCCFLAGS) -dc -o $@ $<
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-test: fractal_hash
+test: fractal_hash fractal_cipher
 	@echo "=== CPU test vectors ===" && ./fractal_hash --test
 	@echo "" && echo "=== CPU bench ===" && ./fractal_hash --bench
+	@echo "" && echo "=== Cipher self-test ===" && ./fractal_cipher test
+
+test-cipher: fractal_cipher
+	@./fractal_cipher test
 
 test-gpu: fractal_gpu
 	@echo "=== GPU bench ===" && ./fractal_gpu --bench
@@ -78,8 +98,9 @@ test-gpu: fractal_gpu
 
 # ── Utility ──────────────────────────────────────────────────────────────────
 clean:
-	rm -f fractal_hash fractal_gpu \
-	      fractal_sponge.o main.o \
+	rm -f fractal_hash fractal_gpu fractal_cipher \
+	      fractal_sponge.o fractal_sponge_avx2.o main.o \
+	      fractal_cipher.o cipher_main.o \
 	      fractal_sponge_cpu.o fractal_sponge_cu.o \
 	      birthday.o avalanche.o differential.o gpu_main.o
 

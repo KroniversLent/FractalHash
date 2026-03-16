@@ -45,6 +45,11 @@ extern "C" {
 /* Hash arbitrary data → 32-byte digest */
 void fs256_hash(const uint8_t *data, size_t len, uint8_t digest[FS256_DIGEST_BYTES]);
 
+/* Low-level: run the 24-round permutation on a raw 8-word state.
+ * Uses AVX2 if available (same dispatch as fs256_hash).
+ * Callers manage their own sponge construction on top of this. */
+void fs256_permute(uint64_t state[FS_STATE_WORDS]);
+
 /* Convenience: hash to hex string (65 bytes including NUL) */
 void fs256_hash_hex(const uint8_t *data, size_t len, char hex[FS256_DIGEST_HEX]);
 
