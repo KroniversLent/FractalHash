@@ -6,7 +6,7 @@
 CC      := gcc
 # -march=native omitted: enables -mfma on modern CPUs, breaking cross-platform
 # reproducibility. fractal_sponge.c uses #pragma STDC FP_CONTRACT OFF instead.
-CFLAGS  := -O2 -Wall -Wextra -lm -ffp-contract=off
+CFLAGS  := -O3 -Wall -Wextra -lm -ffp-contract=off
 NVCC    := nvcc
 
 GPU_ARCH := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \

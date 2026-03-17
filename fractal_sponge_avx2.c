@@ -268,24 +268,23 @@ static inline uint64_t rot64a(uint64_t v, int n) {
     return (v << n) | (v >> (64 - n));
 }
 
-/* ── round constant (scalar) ─────────────────────────────────────────────── */
-static inline uint64_t rca(int r) {
-    return (RC_PHI   * (uint64_t)(r + 1))
-         ^ (RC_SQRT2 * (uint64_t)(r * 7 + 3))
-         ^ (RC_SQRT3 * (uint64_t)(r * 13 + 5));
-}
+/* Precomputed round constants table — built by fractal_sponge.c:init_permutation().
+ * Using it avoids 3 multiplications + 2 XORs per round. */
+extern uint64_t RC_TABLE[24]; /* FS_ROUNDS = 24 */
 
-/* ── theta_xor (scalar — cheap, not worth AVX-ing) ──────────────────────── */
+/* ── theta_xor (scalar — cheap, not worth AVX-ing; unrolled for -O3) ──── */
 static void theta_xor_a(uint64_t s[8], uint64_t rcc) {
     uint64_t p  = s[0]^s[1]^s[2]^s[3];
     uint64_t q  = s[4]^s[5]^s[6]^s[7];
     uint64_t d  = p ^ q ^ rot64a(p,1) ^ rot64a(q,7);
-    for (int i = 0; i < 8; i++) s[i] ^= d;
+    s[0]^=d; s[1]^=d; s[2]^=d; s[3]^=d;
+    s[4]^=d; s[5]^=d; s[6]^=d; s[7]^=d;
 
     uint64_t p2 = s[0]^s[2]^s[4]^s[6];
     uint64_t q2 = s[1]^s[3]^s[5]^s[7];
     uint64_t d2 = rot64a(p2,13) ^ rot64a(q2,41) ^ rcc;
-    for (int i = 0; i < 8; i++) s[i] ^= d2;
+    s[0]^=d2; s[1]^=d2; s[2]^=d2; s[3]^=d2;
+    s[4]^=d2; s[5]^=d2; s[6]^=d2; s[7]^=d2;
 }
 
 /*
@@ -296,61 +295,74 @@ static void theta_xor_a(uint64_t s[8], uint64_t rcc) {
  * same order, same rounding — no FMA, no fast-math).
  */
 void fractal_permutation_avx2(uint64_t s[8]) {
+    static const int cells0123[4] = {0, 1, 2, 3};
+
     for (int r = 0; r < FS_ROUNDS; r++) {
-        uint64_t rcc = rca(r);
+        uint64_t rcc = RC_TABLE[r];
 
         /* θ_XOR */
         theta_xor_a(s, rcc);
 
-        /* ρ — rotate each word */
-        for (int i = 0; i < 8; i++)
-            s[i] = rot64a(s[i], FS_RHO[i]);
+        /* ρ + π combined — single unrolled pass, no temp array, no memcpy.
+         *
+         * FS_RHO = {1, 3, 6, 10, 15, 21, 28, 36}
+         * FS_PI  = {3, 6, 1,  4,  7,  2,  5,  0}
+         *
+         * dest[0]=rot(s[7],36), dest[1]=rot(s[2], 6), dest[2]=rot(s[5],21)
+         * dest[3]=rot(s[0], 1), dest[4]=rot(s[3],10), dest[5]=rot(s[6],28)
+         * dest[6]=rot(s[1], 3), dest[7]=rot(s[4],15)
+         */
+        uint64_t t0 = rot64a(s[7], 36);
+        uint64_t t1 = rot64a(s[2],  6);
+        uint64_t t2 = rot64a(s[5], 21);
+        uint64_t t3 = rot64a(s[0],  1);
+        uint64_t t4 = rot64a(s[3], 10);
+        uint64_t t5 = rot64a(s[6], 28);
+        uint64_t t6 = rot64a(s[1],  3);
+        uint64_t t7 = rot64a(s[4], 15);
 
-        /* π — permute positions */
-        uint64_t tmp[8];
-        for (int i = 0; i < 8; i++) tmp[FS_PI[i]] = s[i];
-        memcpy(s, tmp, 64);
+        /* χ_F — unrolled context mixing (no modulo, no second memcpy).
+         * ctx[i] = t[i] ^ rot(t[(i+1)%8],13) ^ rot(t[(i+7)%8],41) ^ rot(t[(i+4)%8],27) */
+        uint64_t ctx[8] = {
+            t0^rot64a(t1,13)^rot64a(t7,41)^rot64a(t4,27),
+            t1^rot64a(t2,13)^rot64a(t0,41)^rot64a(t5,27),
+            t2^rot64a(t3,13)^rot64a(t1,41)^rot64a(t6,27),
+            t3^rot64a(t4,13)^rot64a(t2,41)^rot64a(t7,27),
+            t4^rot64a(t5,13)^rot64a(t3,41)^rot64a(t0,27),
+            t5^rot64a(t6,13)^rot64a(t4,41)^rot64a(t1,27),
+            t6^rot64a(t7,13)^rot64a(t5,41)^rot64a(t2,27),
+            t7^rot64a(t0,13)^rot64a(t6,41)^rot64a(t3,27),
+        };
 
-        /* χ_F — build context words, then process as two 4-wide SIMD batches */
-        uint64_t t[8];
-        memcpy(t, s, 64);
+        /* Precompute rotated rcc values for both SIMD batches */
+        uint64_t rcc0[4] = {
+            rcc,                rot64a(rcc,  8),
+            rot64a(rcc, 16),    rot64a(rcc, 24)
+        };
+        uint64_t rcc1[4] = {
+            rot64a(rcc, 32),    rot64a(rcc, 40),
+            rot64a(rcc, 48),    rot64a(rcc, 56)
+        };
 
-        /* context mixing (scalar — just 8 rotations+xors) */
-        uint64_t ctx[8];
-        for (int i = 0; i < 8; i++) {
-            ctx[i] = t[i]
-                   ^ rot64a(t[(i+1)%8], 13)
-                   ^ rot64a(t[(i+7)%8], 41)
-                   ^ rot64a(t[(i+4)%8], 27);
-        }
+        /* batch 0: ctx[0..3] → s[0..3] */
+        fractal_sbox_x4(ctx,     cells0123, rcc0, s);
 
-        /* batch 0: words 0-3 (cells 0,1,2,3) */
-        {
-            const int    cells0[4] = {0, 1, 2, 3};
-            uint64_t rcc0[4] = {
-                rot64a(rcc, 0*8), rot64a(rcc, 1*8),
-                rot64a(rcc, 2*8), rot64a(rcc, 3*8)
-            };
-            fractal_sbox_x4(ctx, cells0, rcc0, s);   /* s[0..3] */
-        }
-
-        /* batch 1: words 4-7 (cells 0,1,2,3) */
-        {
-            const int    cells1[4] = {0, 1, 2, 3};
-            uint64_t rcc1[4] = {
-                rot64a(rcc, 4*8), rot64a(rcc, 5*8),
-                rot64a(rcc, 6*8), rot64a(rcc, 7*8)
-            };
-            fractal_sbox_x4(ctx + 4, cells1, rcc1, s + 4);   /* s[4..7] */
-        }
+        /* batch 1: ctx[4..7] → s[4..7] */
+        fractal_sbox_x4(ctx + 4, cells0123, rcc1, s + 4);
 
         /* ι */
         s[0] ^= rcc;
         s[1] ^= rot64a(rcc, 32);
     }
 
-    /* Final full-state coupling */
+    /* Final full-state coupling — unrolled */
     uint64_t xall = s[0]^s[1]^s[2]^s[3]^s[4]^s[5]^s[6]^s[7];
-    for (int i = 0; i < 8; i++)
-        s[i] ^= rot64a(xall, i * 7 + 1);
+    s[0] ^= rot64a(xall,  1);
+    s[1] ^= rot64a(xall,  8);
+    s[2] ^= rot64a(xall, 15);
+    s[3] ^= rot64a(xall, 22);
+    s[4] ^= rot64a(xall, 29);
+    s[5] ^= rot64a(xall, 36);
+    s[6] ^= rot64a(xall, 43);
+    s[7] ^= rot64a(xall, 50);
 }

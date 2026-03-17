@@ -59,13 +59,15 @@ static int cpu_has_avx2(void) {
 #endif
 }
 
-/* Forward declaration — defined later in this file */
+/* Forward declarations — defined later in this file */
 static void fractal_permutation(uint64_t s[8]);
+static void build_rc_table(void);
 
 /* Function pointer — set on first call */
 static void (*active_permutation)(uint64_t[8]) = NULL;
 
 static void init_permutation(void) {
+    build_rc_table();
     if (cpu_has_avx2()) {
         active_permutation = fractal_permutation_avx2;
     } else {
@@ -83,12 +85,20 @@ static inline uint64_t rot64(uint64_t v, int n) {
     return (v << n) | (v >> (64 - n));
 }
 
-/* Read big-endian uint64 from 8 bytes */
+/* Read big-endian uint64 from 8 bytes.
+ * On little-endian x86/x86-64, a single bswap instruction is faster than
+ * eight byte loads and shifts. Falls back to portable shifts on big-endian. */
 static inline uint64_t be64(const uint8_t *p) {
+#if defined(__GNUC__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    uint64_t v;
+    __builtin_memcpy(&v, p, 8);
+    return __builtin_bswap64(v);
+#else
     return ((uint64_t)p[0]<<56)|((uint64_t)p[1]<<48)|
            ((uint64_t)p[2]<<40)|((uint64_t)p[3]<<32)|
            ((uint64_t)p[4]<<24)|((uint64_t)p[5]<<16)|
            ((uint64_t)p[6]<< 8)|((uint64_t)p[7]);
+#endif
 }
 
 static inline void put_be64(uint8_t *p, uint64_t v) {
@@ -104,6 +114,16 @@ static inline uint64_t rc(int r) {
     return (RC_PHI*(uint64_t)(r+1))
          ^ (RC_SQRT2*(uint64_t)(r*7+3))
          ^ (RC_SQRT3*(uint64_t)(r*13+5));
+}
+
+/* Precomputed table — avoids 3 multiplications + 2 XORs per round call.
+ * Values are constant for the lifetime of the program; the table is filled
+ * once by fractal_permutation_init() which is called from init_permutation(). */
+uint64_t RC_TABLE[FS_ROUNDS];
+
+static void build_rc_table(void) {
+    for (int r = 0; r < FS_ROUNDS; r++)
+        RC_TABLE[r] = rc(r);
 }
 
 /* ── IEEE 754 mantissa extraction ────────────────────────────────────────── */
@@ -240,29 +260,41 @@ static void theta_xor(uint64_t s[8], uint64_t rcc) {
 
 static void fractal_permutation(uint64_t s[8]) {
     for (int r = 0; r < FS_ROUNDS; r++) {
-        uint64_t rcc = rc(r);
+        uint64_t rcc = RC_TABLE[r];
 
         /* θ_XOR — integer column parity diffusion */
         theta_xor(s, rcc);
 
-        /* ρ */
-        for (int i = 0; i < 8; i++)
-            s[i] = rot64(s[i], FS_RHO[i]);
+        /* ρ + π combined into a single unrolled pass — no temp array, no memcpy.
+         *
+         * FS_RHO = {1, 3, 6, 10, 15, 21, 28, 36}
+         * FS_PI  = {3, 6, 1,  4,  7,  2,  5,  0}   (src index → dest slot)
+         *
+         * Resulting mapping (dest = rot(src, rho)):
+         *   dest[0] = rot(s[7], 36),  dest[1] = rot(s[2],  6)
+         *   dest[2] = rot(s[5], 21),  dest[3] = rot(s[0],  1)
+         *   dest[4] = rot(s[3], 10),  dest[5] = rot(s[6], 28)
+         *   dest[6] = rot(s[1],  3),  dest[7] = rot(s[4], 15)
+         */
+        uint64_t t0 = rot64(s[7], 36);
+        uint64_t t1 = rot64(s[2],  6);
+        uint64_t t2 = rot64(s[5], 21);
+        uint64_t t3 = rot64(s[0],  1);
+        uint64_t t4 = rot64(s[3], 10);
+        uint64_t t5 = rot64(s[6], 28);
+        uint64_t t6 = rot64(s[1],  3);
+        uint64_t t7 = rot64(s[4], 15);
 
-        /* π */
-        uint64_t tmp[8];
-        for (int i = 0; i < 8; i++) tmp[FS_PI[i]] = s[i];
-        memcpy(s, tmp, 64);
-
-        /* χ_F — widened context: adjacent + antipodal word for full coupling */
-        uint64_t t[8]; memcpy(t, s, 64);
-        for (int i = 0; i < 8; i++) {
-            uint64_t ctx = t[i]
-                         ^ rot64(t[(i+1)%8], 13)
-                         ^ rot64(t[(i+7)%8], 41)
-                         ^ rot64(t[(i+4)%8], 27);  /* antipodal word */
-            s[i] = fractal_sbox(ctx, i%4, rot64(rcc, i*8));
-        }
+        /* χ_F — unrolled context mixing (eliminates modulo + second memcpy).
+         * ctx[i] = t[i] ^ rot(t[(i+1)%8],13) ^ rot(t[(i+7)%8],41) ^ rot(t[(i+4)%8],27) */
+        s[0] = fractal_sbox(t0^rot64(t1,13)^rot64(t7,41)^rot64(t4,27), 0, rot64(rcc,  0));
+        s[1] = fractal_sbox(t1^rot64(t2,13)^rot64(t0,41)^rot64(t5,27), 1, rot64(rcc,  8));
+        s[2] = fractal_sbox(t2^rot64(t3,13)^rot64(t1,41)^rot64(t6,27), 2, rot64(rcc, 16));
+        s[3] = fractal_sbox(t3^rot64(t4,13)^rot64(t2,41)^rot64(t7,27), 3, rot64(rcc, 24));
+        s[4] = fractal_sbox(t4^rot64(t5,13)^rot64(t3,41)^rot64(t0,27), 0, rot64(rcc, 32));
+        s[5] = fractal_sbox(t5^rot64(t6,13)^rot64(t4,41)^rot64(t1,27), 1, rot64(rcc, 40));
+        s[6] = fractal_sbox(t6^rot64(t7,13)^rot64(t5,41)^rot64(t2,27), 2, rot64(rcc, 48));
+        s[7] = fractal_sbox(t7^rot64(t0,13)^rot64(t6,41)^rot64(t3,27), 3, rot64(rcc, 56));
 
         /* ι */
         s[0] ^= rcc;
@@ -272,8 +304,14 @@ static void fractal_permutation(uint64_t s[8]) {
     /* Final full-state coupling before squeeze — ensures all 8 words are
      * mutually dependent. Prevents rank deficiency in digest top bytes. */
     uint64_t xall = s[0]^s[1]^s[2]^s[3]^s[4]^s[5]^s[6]^s[7];
-    for (int i = 0; i < 8; i++)
-        s[i] ^= rot64(xall, i * 7 + 1);
+    s[0] ^= rot64(xall,  1);
+    s[1] ^= rot64(xall,  8);
+    s[2] ^= rot64(xall, 15);
+    s[3] ^= rot64(xall, 22);
+    s[4] ^= rot64(xall, 29);
+    s[5] ^= rot64(xall, 36);
+    s[6] ^= rot64(xall, 43);
+    s[7] ^= rot64(xall, 50);
 }
 
 /* ── Padding (SHA-3 multirate) ────────────────────────────────────────────── */
@@ -294,18 +332,29 @@ static size_t fs_pad(const uint8_t *in, size_t len, uint8_t *out) {
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
+/* Stack buffer covers inputs up to (FS_HASH_STACKBUF - FS_BLOCK_BYTES - 1) bytes
+ * without any heap allocation — eliminates malloc/free overhead for typical
+ * short-message workloads (keys, passwords, block hashes, etc.). */
+#define FS_HASH_STACKBUF  (FS_BLOCK_BYTES * 10)   /* 320 bytes: handles up to 287-byte inputs */
+
 void fs256_hash(const uint8_t *data, size_t len, uint8_t digest[FS256_DIGEST_BYTES]) {
-    /* Allocate padded buffer on heap to avoid VLA / stack blowup on large inputs */
-    size_t padded_len = len + FS_BLOCK_BYTES;
-    /* Round up to next block boundary */
-    padded_len = ((padded_len + FS_BLOCK_BYTES - 1) / FS_BLOCK_BYTES) * FS_BLOCK_BYTES;
-    uint8_t *buf = (uint8_t *)malloc(padded_len);
-    if (!buf) return;  /* caller should check but we can't return error here */
-
-    size_t plen = fs_pad(data, len, buf);
-
     /* One-time CPU capability detection */
     if (!active_permutation) init_permutation();
+
+    /* Compute padded length: next block boundary after (len + 1) pad byte */
+    size_t padded_len = ((len + FS_BLOCK_BYTES) / FS_BLOCK_BYTES) * FS_BLOCK_BYTES;
+
+    /* Use stack buffer for small inputs to avoid malloc/free overhead */
+    uint8_t stack_buf[FS_HASH_STACKBUF];
+    uint8_t *buf;
+    if (padded_len <= FS_HASH_STACKBUF) {
+        buf = stack_buf;
+    } else {
+        buf = (uint8_t *)malloc(padded_len);
+        if (!buf) return;
+    }
+
+    size_t plen = fs_pad(data, len, buf);
 
     uint64_t state[8] = {0};
     for (size_t off = 0; off < plen; off += FS_BLOCK_BYTES) {
@@ -313,7 +362,8 @@ void fs256_hash(const uint8_t *data, size_t len, uint8_t digest[FS256_DIGEST_BYT
             state[j] ^= be64(buf + off + j*8);
         active_permutation(state);
     }
-    free(buf);
+
+    if (buf != stack_buf) free(buf);
 
     for (int i = 0; i < 4; i++)
         put_be64(digest + i*8, state[i]);
